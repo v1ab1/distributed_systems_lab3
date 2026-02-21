@@ -1,0 +1,504 @@
+name: Deploy v1 to Yandex Cloud
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}/v1
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [Flight, Gateway, Ticket, Bonus]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        working-directory: ./v1/${{ matrix.service }}
+        run: |
+          uv venv .venv
+          uv sync --locked
+
+      - name: Run tests
+        working-directory: ./v1/${{ matrix.service }}
+        run: |
+          uv run pytest tests/ -v
+
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - name: flight
+            path: Flight
+            port: 8060
+          - name: gateway
+            path: Gateway
+            port: 8080
+          - name: ticket
+            path: Ticket
+            port: 8070
+          - name: bonus
+            path: Bonus
+            port: 8050
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./v1/${{ matrix.path }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  postman-tests:
+    name: Run Postman Tests
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Newman
+        run: |
+          npm install -g newman
+          npm install -g newman-reporter-html
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start services with Docker Compose
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER || 'program' }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'test' }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT || '5432' }}
+          GATEWAY_PORT: ${{ secrets.GATEWAY_PORT || '8080' }}
+          FLIGHT_PORT: ${{ secrets.FLIGHT_PORT || '8060' }}
+          TICKET_PORT: ${{ secrets.TICKET_PORT || '8070' }}
+          BONUS_PORT: ${{ secrets.BONUS_PORT || '8050' }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+        run: |
+          cd v1
+          
+          # Создаем .env файл для docker-compose
+          cat > .env << EOF
+          POSTGRES_USER=$POSTGRES_USER
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          POSTGRES_PORT=$POSTGRES_PORT
+          GATEWAY_PORT=$GATEWAY_PORT
+          FLIGHT_PORT=$FLIGHT_PORT
+          TICKET_PORT=$TICKET_PORT
+          BONUS_PORT=$BONUS_PORT
+          FLIGHT_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-flight:latest
+          TICKET_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-ticket:latest
+          BONUS_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-bonus:latest
+          GATEWAY_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-gateway:latest
+          EOF
+          
+          # Запускаем сервисы
+          docker compose -f docker-compose.prod.yml up -d
+          
+          # Показываем статус контейнеров
+          echo "Container status:"
+          docker compose -f docker-compose.prod.yml ps
+          
+          # Ждем завершения postgres-init
+          echo "Waiting for postgres-init to complete..."
+          for i in {1..60}; do
+            INIT_STATUS=$(docker compose -f docker-compose.prod.yml ps postgres-init --format json 2>/dev/null | grep -o '"State":"[^"]*"' | cut -d'"' -f4 || echo "not_found")
+            if [ "$INIT_STATUS" = "exited" ] || [ "$INIT_STATUS" = "not_found" ]; then
+              echo "✅ postgres-init completed or not found"
+              if [ "$INIT_STATUS" = "exited" ]; then
+                echo "postgres-init logs:"
+                docker compose -f docker-compose.prod.yml logs postgres-init
+              fi
+              break
+            fi
+            echo "Waiting for postgres-init... ($i/60)"
+            sleep 2
+          done
+          
+          # Проверяем, что базы данных созданы
+          echo "Checking if databases exist..."
+          docker compose -f docker-compose.prod.yml exec -T postgres psql -U $POSTGRES_USER -d template1 -c "\l" || echo "Warning: Could not check databases"
+          
+          # Ждем готовности всех сервисов
+          echo "Waiting for services to be ready..."
+          
+          # Проверяем Flight
+          echo "Checking Flight service..."
+          for i in {1..60}; do
+            if curl -f http://localhost:$FLIGHT_PORT/docs > /dev/null 2>&1; then
+              echo "✅ Flight is ready!"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "❌ Flight service is not ready!"
+              docker compose -f docker-compose.prod.yml logs flight
+              exit 1
+            fi
+            sleep 2
+          done
+          
+          # Проверяем Ticket
+          echo "Checking Ticket service..."
+          for i in {1..60}; do
+            if curl -f http://localhost:$TICKET_PORT/docs > /dev/null 2>&1; then
+              echo "✅ Ticket is ready!"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "❌ Ticket service is not ready!"
+              docker compose -f docker-compose.prod.yml logs ticket
+              exit 1
+            fi
+            sleep 2
+          done
+          
+          # Проверяем Bonus
+          echo "Checking Bonus service..."
+          for i in {1..60}; do
+            if curl -f http://localhost:$BONUS_PORT/docs > /dev/null 2>&1; then
+              echo "✅ Bonus is ready!"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "❌ Bonus service is not ready!"
+              docker compose -f docker-compose.prod.yml logs bonus
+              exit 1
+            fi
+            sleep 2
+          done
+          
+          # Проверяем Gateway (последним, так как он зависит от других)
+          echo "Checking Gateway service..."
+          for i in {1..60}; do
+            if curl -f http://localhost:$GATEWAY_PORT/docs > /dev/null 2>&1; then
+              echo "✅ Gateway is ready!"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "❌ Gateway is not accessible after waiting!"
+              docker compose -f docker-compose.prod.yml logs
+              exit 1
+            fi
+            echo "Waiting for Gateway... ($i/60)"
+            sleep 2
+          done
+          
+          # Дополнительная пауза для полной инициализации
+          echo "Waiting additional 10 seconds for full initialization..."
+          sleep 10
+          
+          # Финальная проверка всех сервисов
+          echo "Final health check:"
+          curl -f http://localhost:$FLIGHT_PORT/docs > /dev/null 2>&1 && echo "✅ Flight OK" || (echo "❌ Flight failed" && docker compose -f docker-compose.prod.yml logs flight --tail=50)
+          curl -f http://localhost:$TICKET_PORT/docs > /dev/null 2>&1 && echo "✅ Ticket OK" || (echo "❌ Ticket failed" && docker compose -f docker-compose.prod.yml logs ticket --tail=50)
+          curl -f http://localhost:$BONUS_PORT/docs > /dev/null 2>&1 && echo "✅ Bonus OK" || (echo "❌ Bonus failed" && docker compose -f docker-compose.prod.yml logs bonus --tail=50)
+          curl -f http://localhost:$GATEWAY_PORT/docs > /dev/null 2>&1 && echo "✅ Gateway OK" || (echo "❌ Gateway failed" && docker compose -f docker-compose.prod.yml logs gateway --tail=50)
+
+      - name: Run Postman tests
+        env:
+          GATEWAY_PORT: ${{ secrets.GATEWAY_PORT || '8080' }}
+        working-directory: .
+        run: |
+          # Создаем environment файл с локальным URL
+          cat > /tmp/postman-env.json << EOF
+          {
+            "id": "test-env",
+            "name": "Test Environment",
+            "values": [
+              {
+                "key": "baseUrl",
+                "value": "http://localhost:$GATEWAY_PORT",
+                "enabled": true
+              }
+            ],
+            "_postman_variable_scope": "environment"
+          }
+          EOF
+          
+          echo "Running Postman tests against http://localhost:$GATEWAY_PORT"
+          echo "Service status before tests:"
+          (cd v1 && docker compose -f docker-compose.prod.yml ps)
+          
+          # Проверяем наличие файла коллекции
+          if [ ! -f "v1/postman/collection.json" ]; then
+            echo "❌ Postman collection not found at v1/postman/collection.json"
+            echo "Current directory: $(pwd)"
+            echo "Files in v1/postman/:"
+            ls -la v1/postman/ || echo "Directory v1/postman/ does not exist"
+            exit 1
+          fi
+          
+          echo "Found Postman collection at v1/postman/collection.json"
+          
+          # Запускаем Postman тесты (из корня репозитория)
+          newman run v1/postman/collection.json \
+            -e /tmp/postman-env.json \
+            --reporters cli,html \
+            --reporter-html-export postman-report.html \
+            --timeout-request 30000 \
+            --delay-request 1000 \
+            --bail || {
+              echo "❌ Postman tests failed!"
+              echo "Service logs:"
+              (cd v1 && docker compose -f docker-compose.prod.yml logs --tail=100)
+              exit 1
+            }
+          
+      - name: Upload Postman report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postman-test-report
+          path: postman-report.html
+          retention-days: 30
+
+      - name: Stop services
+        if: always()
+        run: |
+          cd v1
+          docker compose -f docker-compose.prod.yml down -v
+
+  deploy:
+    name: Deploy to Yandex Cloud
+    needs: postman-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT || '5432' }}
+          GATEWAY_PORT: ${{ secrets.GATEWAY_PORT || '8080' }}
+          FLIGHT_PORT: ${{ secrets.FLIGHT_PORT || '8060' }}
+          TICKET_PORT: ${{ secrets.TICKET_PORT || '8070' }}
+          BONUS_PORT: ${{ secrets.BONUS_PORT || '8050' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+        run: |
+          ssh $SERVER_USER@$SERVER_HOST bash -s << ENDSSH
+            set -e
+            
+            # Создаем директорию проекта
+            mkdir -p ~/v1-app
+            cd ~/v1-app
+            
+            # Логинимся в GitHub Container Registry
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
+            
+            # Скачиваем docker-compose файл
+            curl -f -o docker-compose.prod.yml https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/v1/docker-compose.prod.yml || {
+              echo "Ошибка: не удалось скачать docker-compose.prod.yml"
+              exit 1
+            }
+            
+            # Создаем директорию для SQL скриптов
+            mkdir -p postgres
+            
+            # Скачиваем SQL скрипт для инициализации
+            curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/v1/postgres/10-create-user-and-db.sql || {
+              echo "Предупреждение: не удалось скачать SQL скрипт, создаем базовый скрипт"
+              echo "-- Создание пользователя" > postgres/10-create-user-and-db.sql
+              echo "CREATE ROLE program WITH PASSWORD 'test';" >> postgres/10-create-user-and-db.sql
+              echo "ALTER ROLE program WITH LOGIN;" >> postgres/10-create-user-and-db.sql
+              echo "" >> postgres/10-create-user-and-db.sql
+              echo "-- Создание баз данных" >> postgres/10-create-user-and-db.sql
+              echo "CREATE DATABASE tickets;" >> postgres/10-create-user-and-db.sql
+              echo "GRANT ALL PRIVILEGES ON DATABASE tickets TO program;" >> postgres/10-create-user-and-db.sql
+              echo "" >> postgres/10-create-user-and-db.sql
+              echo "CREATE DATABASE flights;" >> postgres/10-create-user-and-db.sql
+              echo "GRANT ALL PRIVILEGES ON DATABASE flights TO program;" >> postgres/10-create-user-and-db.sql
+              echo "" >> postgres/10-create-user-and-db.sql
+              echo "CREATE DATABASE privileges;" >> postgres/10-create-user-and-db.sql
+              echo "GRANT ALL PRIVILEGES ON DATABASE privileges TO program;" >> postgres/10-create-user-and-db.sql
+            }
+            
+            # Скачиваем скрипт для создания баз данных (для init-контейнера)
+            curl -f -o postgres/20-create-databases.sh https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/v1/postgres/20-create-databases.sh || {
+              echo "Предупреждение: не удалось скачать скрипт создания БД, создаем базовый скрипт"
+              echo '#!/bin/bash' > postgres/20-create-databases.sh
+              echo 'set -e' >> postgres/20-create-databases.sh
+              echo 'PGPASSWORD="${POSTGRES_PASSWORD:-test}" psql -h postgres -U "${POSTGRES_USER:-program}" -d postgres <<EOSQL' >> postgres/20-create-databases.sh
+              echo 'DO \$\$' >> postgres/20-create-databases.sh
+              echo 'BEGIN' >> postgres/20-create-databases.sh
+              echo '    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '\''program'\'') THEN' >> postgres/20-create-databases.sh
+              echo '        CREATE ROLE program WITH PASSWORD '\''test'\'';' >> postgres/20-create-databases.sh
+              echo '        ALTER ROLE program WITH LOGIN;' >> postgres/20-create-databases.sh
+              echo '    END IF;' >> postgres/20-create-databases.sh
+              echo 'END' >> postgres/20-create-databases.sh
+              echo '\$\$;' >> postgres/20-create-databases.sh
+              echo 'SELECT '\''CREATE DATABASE tickets'\'' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '\''tickets'\'')\gexec' >> postgres/20-create-databases.sh
+              echo 'SELECT '\''CREATE DATABASE flights'\'' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '\''flights'\'')\gexec' >> postgres/20-create-databases.sh
+              echo 'SELECT '\''CREATE DATABASE privileges'\'' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '\''privileges'\'')\gexec' >> postgres/20-create-databases.sh
+              echo 'GRANT ALL PRIVILEGES ON DATABASE tickets TO program;' >> postgres/20-create-databases.sh
+              echo 'GRANT ALL PRIVILEGES ON DATABASE flights TO program;' >> postgres/20-create-databases.sh
+              echo 'GRANT ALL PRIVILEGES ON DATABASE privileges TO program;' >> postgres/20-create-databases.sh
+              echo 'EOSQL' >> postgres/20-create-databases.sh
+              chmod +x postgres/20-create-databases.sh
+            }
+            chmod +x postgres/20-create-databases.sh
+            
+            # Проверяем, что файлы скачались
+            if [ ! -s docker-compose.prod.yml ]; then
+              echo "Ошибка: docker-compose.prod.yml пустой или не существует"
+              exit 1
+            fi
+            
+            # Создаем .env файл
+            echo "POSTGRES_USER=$POSTGRES_USER" > .env
+            echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" >> .env
+            echo "POSTGRES_PORT=$POSTGRES_PORT" >> .env
+            echo "GATEWAY_PORT=$GATEWAY_PORT" >> .env
+            echo "FLIGHT_PORT=$FLIGHT_PORT" >> .env
+            echo "TICKET_PORT=$TICKET_PORT" >> .env
+            echo "BONUS_PORT=$BONUS_PORT" >> .env
+            echo "FLIGHT_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-flight:latest" >> .env
+            echo "GATEWAY_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-gateway:latest" >> .env
+            echo "TICKET_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-ticket:latest" >> .env
+            echo "BONUS_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-bonus:latest" >> .env
+            
+            # Определяем команду docker compose
+            if command -v docker-compose &> /dev/null; then
+              # Используем старую версию docker-compose
+              docker-compose -f docker-compose.prod.yml down || true
+              docker image prune -f || true
+              docker-compose -f docker-compose.prod.yml pull
+              docker-compose -f docker-compose.prod.yml up -d
+              docker-compose -f docker-compose.prod.yml ps
+            elif docker compose version &> /dev/null 2>&1; then
+              # Используем новую версию docker compose (плагин)
+              docker compose -f docker-compose.prod.yml down || true
+              docker image prune -f || true
+              docker compose -f docker-compose.prod.yml pull
+              docker compose -f docker-compose.prod.yml up -d
+              docker compose -f docker-compose.prod.yml ps
+            else
+              echo "Ошибка: docker-compose не найден"
+              exit 1
+            fi
+            
+            echo "Deployment completed successfully!"
+          ENDSSH
+
+      - name: Health check
+        run: |
+          sleep 30
+          for i in {1..10}; do
+            if curl -f http://${{ secrets.SERVER_HOST }}:${{ secrets.GATEWAY_PORT || '8080' }}/docs > /dev/null 2>&1; then
+              echo "✅ Gateway health check passed!"
+              break
+            fi
+            echo "Waiting for Gateway service... ($i/10)"
+            sleep 5
+          done
+          
+          for i in {1..10}; do
+            if curl -f http://${{ secrets.SERVER_HOST }}:${{ secrets.FLIGHT_PORT || '8060' }}/docs > /dev/null 2>&1; then
+              echo "✅ Flight health check passed!"
+              break
+            fi
+            echo "Waiting for Flight service... ($i/10)"
+            sleep 5
+          done
+          
+          for i in {1..10}; do
+            if curl -f http://${{ secrets.SERVER_HOST }}:${{ secrets.TICKET_PORT || '8070' }}/docs > /dev/null 2>&1; then
+              echo "✅ Ticket health check passed!"
+              break
+            fi
+            echo "Waiting for Ticket service... ($i/10)"
+            sleep 5
+          done
+          
+          for i in {1..10}; do
+            if curl -f http://${{ secrets.SERVER_HOST }}:${{ secrets.BONUS_PORT || '8050' }}/docs > /dev/null 2>&1; then
+              echo "✅ Bonus health check passed!"
+              exit 0
+            fi
+            echo "Waiting for Bonus service... ($i/10)"
+            sleep 5
+          done
+          echo "❌ Health check failed!"
+          exit 1
