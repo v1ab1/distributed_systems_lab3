@@ -323,7 +323,16 @@ jobs:
               exit 1
             }
             
-            mkdir -p postgres
+            mkdir -p postgres postgres/scripts
+            
+            curl -f -o postgres/scripts/db-v1.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/scripts/db-v1.sql || {
+              echo "CREATE DATABASE tickets;" > postgres/scripts/db-v1.sql
+              echo "GRANT ALL PRIVILEGES ON DATABASE tickets TO program;" >> postgres/scripts/db-v1.sql
+              echo "CREATE DATABASE flights;" >> postgres/scripts/db-v1.sql
+              echo "GRANT ALL PRIVILEGES ON DATABASE flights TO program;" >> postgres/scripts/db-v1.sql
+              echo "CREATE DATABASE privileges;" >> postgres/scripts/db-v1.sql
+              echo "GRANT ALL PRIVILEGES ON DATABASE privileges TO program;" >> postgres/scripts/db-v1.sql
+            }
             
             curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/10-create-user-and-db.sql || curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/10-create-user.sql || {
               echo "Предупреждение: не удалось скачать SQL скрипт, создаем базовый скрипт"
