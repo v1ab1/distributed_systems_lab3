@@ -334,7 +334,7 @@ jobs:
               echo "CREATE DATABASE privileges;" >> db-v1.sql.tmp
               echo "GRANT ALL PRIVILEGES ON DATABASE privileges TO program;" >> db-v1.sql.tmp
             }
-            mv db-v1.sql.tmp postgres/scripts/db-v1.sql
+            (mv db-v1.sql.tmp postgres/scripts/db-v1.sql 2>/dev/null) || sudo mv db-v1.sql.tmp postgres/scripts/db-v1.sql
             
             curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/10-create-user-and-db.sql || curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/10-create-user.sql || {
               echo "Предупреждение: не удалось скачать SQL скрипт, создаем базовый скрипт"

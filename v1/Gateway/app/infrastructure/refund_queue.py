@@ -1,5 +1,3 @@
-"""Очередь возвратов бонусов при отмене билета: при недоступности Bonus ставим в очередь и обрабатываем позже."""
-
 import os
 import json
 import time
@@ -22,7 +20,6 @@ def _get_redis() -> redis.Redis:
 
 
 def enqueue_refund(ticket_uid: str, username: str) -> None:
-    """Поставить в очередь задачу возврата бонусов (повторный вызов cancel в Ticket service)."""
     try:
         r = _get_redis()
         payload = json.dumps({"ticket_uid": ticket_uid, "username": username})
@@ -32,7 +29,6 @@ def enqueue_refund(ticket_uid: str, username: str) -> None:
 
 
 def process_one(cancel_fn: Callable[[str, str], None]) -> bool:
-    """Обработать один элемент очереди. Возвращает True если обработан хотя бы один."""
     try:
         r = _get_redis()
         raw = r.rpop(QUEUE_KEY)
@@ -62,7 +58,6 @@ def run_worker(
     cancel_fn: Callable[[str, str], None] | None = None,
     poll_interval: float = POLL_INTERVAL,
 ) -> None:
-    """Фоновый цикл: раз в poll_interval секунд обрабатывать очередь."""
     fn = cancel_fn or _default_cancel
     while True:
         try:

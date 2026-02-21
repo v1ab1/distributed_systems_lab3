@@ -1,5 +1,3 @@
-"""Circuit breaker: N failures -> open; after timeout try one request (half-open)."""
-
 import os
 import time
 
@@ -19,16 +17,12 @@ RECOVERY_TIMEOUT_SEC = float(
 
 
 class CircuitOpenError(Exception):
-    """Raised when the circuit is open and the call is not attempted."""
-
     def __init__(self, service_name: str) -> None:
         self.service_name = service_name
         super().__init__(f"Circuit open for service: {service_name}")
 
 
 class CircuitBreaker:
-    """In-memory circuit breaker: N failures -> open; after timeout try one request."""
-
     _instances: dict[str, "CircuitBreaker"] = {}
 
     def __init__(
@@ -42,7 +36,7 @@ class CircuitBreaker:
         self.recovery_timeout_sec = recovery_timeout_sec
         self._failure_count = 0
         self._last_failure_time: float = 0.0
-        self._state: str = "closed"  # closed | open | half_open
+        self._state: str = "closed"
 
     @classmethod
     def get(cls, name: str) -> "CircuitBreaker":
