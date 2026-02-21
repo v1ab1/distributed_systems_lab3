@@ -142,9 +142,6 @@ jobs:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
         run: |
-          cd v1
-          
-          # Создаем .env файл для docker-compose
           cat > .env << EOF
           POSTGRES_USER=$POSTGRES_USER
           POSTGRES_PASSWORD=$POSTGRES_PASSWORD
@@ -159,14 +156,11 @@ jobs:
           GATEWAY_DOCKER_IMAGE=$REGISTRY/$IMAGE_PREFIX-gateway:latest
           EOF
           
-          # Запускаем сервисы
           docker compose -f docker-compose.prod.yml up -d
           
-          # Показываем статус контейнеров
           echo "Container status:"
           docker compose -f docker-compose.prod.yml ps
           
-          # Ждем завершения postgres-init
           echo "Waiting for postgres-init to complete..."
           for i in {1..60}; do
             INIT_STATUS=$(docker compose -f docker-compose.prod.yml ps postgres-init --format json 2>/dev/null | grep -o '"State":"[^"]*"' | cut -d'"' -f4 || echo "not_found")
@@ -182,14 +176,11 @@ jobs:
             sleep 2
           done
           
-          # Проверяем, что базы данных созданы
           echo "Checking if databases exist..."
           docker compose -f docker-compose.prod.yml exec -T postgres psql -U $POSTGRES_USER -d template1 -c "\l" || echo "Warning: Could not check databases"
           
-          # Ждем готовности всех сервисов
           echo "Waiting for services to be ready..."
           
-          # Проверяем Flight
           echo "Checking Flight service..."
           for i in {1..60}; do
             if curl -f http://localhost:$FLIGHT_PORT/docs > /dev/null 2>&1; then
@@ -204,7 +195,6 @@ jobs:
             sleep 2
           done
           
-          # Проверяем Ticket
           echo "Checking Ticket service..."
           for i in {1..60}; do
             if curl -f http://localhost:$TICKET_PORT/docs > /dev/null 2>&1; then
@@ -219,7 +209,6 @@ jobs:
             sleep 2
           done
           
-          # Проверяем Bonus
           echo "Checking Bonus service..."
           for i in {1..60}; do
             if curl -f http://localhost:$BONUS_PORT/docs > /dev/null 2>&1; then
@@ -234,7 +223,6 @@ jobs:
             sleep 2
           done
           
-          # Проверяем Gateway (последним, так как он зависит от других)
           echo "Checking Gateway service..."
           for i in {1..60}; do
             if curl -f http://localhost:$GATEWAY_PORT/docs > /dev/null 2>&1; then
@@ -250,11 +238,9 @@ jobs:
             sleep 2
           done
           
-          # Дополнительная пауза для полной инициализации
           echo "Waiting additional 10 seconds for full initialization..."
           sleep 10
           
-          # Финальная проверка всех сервисов
           echo "Final health check:"
           curl -f http://localhost:$FLIGHT_PORT/docs > /dev/null 2>&1 && echo "✅ Flight OK" || (echo "❌ Flight failed" && docker compose -f docker-compose.prod.yml logs flight --tail=50)
           curl -f http://localhost:$TICKET_PORT/docs > /dev/null 2>&1 && echo "✅ Ticket OK" || (echo "❌ Ticket failed" && docker compose -f docker-compose.prod.yml logs ticket --tail=50)
@@ -264,52 +250,18 @@ jobs:
       - name: Run Postman tests
         env:
           GATEWAY_PORT: ${{ secrets.GATEWAY_PORT || '8080' }}
-        working-directory: .
+          COMPOSE_CMD: docker compose
+          COMPOSE_FILE: docker-compose.prod.yml
+          VARIANT: v1
+          SERVICE_NAME: bonus
+          PORT_NUMBER: "8050"
+          NEWMAN_EXTRA_ARGS: "--reporters cli,html --reporter-html-export postman-report.html"
         run: |
-          # Создаем environment файл с локальным URL
-          cat > /tmp/postman-env.json << EOF
-          {
-            "id": "test-env",
-            "name": "Test Environment",
-            "values": [
-              {
-                "key": "baseUrl",
-                "value": "http://localhost:$GATEWAY_PORT",
-                "enabled": true
-              }
-            ],
-            "_postman_variable_scope": "environment"
-          }
-          EOF
-          
-          echo "Running Postman tests against http://localhost:$GATEWAY_PORT"
           echo "Service status before tests:"
-          (cd v1 && docker compose -f docker-compose.prod.yml ps)
-          
-          # Проверяем наличие файла коллекции
-          if [ ! -f "v1/postman/collection.json" ]; then
-            echo "❌ Postman collection not found at v1/postman/collection.json"
-            echo "Current directory: $(pwd)"
-            echo "Files in v1/postman/:"
-            ls -la v1/postman/ || echo "Directory v1/postman/ does not exist"
-            exit 1
-          fi
-          
-          echo "Found Postman collection at v1/postman/collection.json"
-          
-          # Запускаем Postman тесты (из корня репозитория)
-          newman run v1/postman/collection.json \
-            -e /tmp/postman-env.json \
-            --reporters cli,html \
-            --reporter-html-export postman-report.html \
-            --timeout-request 30000 \
-            --delay-request 1000 \
-            --bail || {
-              echo "❌ Postman tests failed!"
-              echo "Service logs:"
-              (cd v1 && docker compose -f docker-compose.prod.yml logs --tail=100)
-              exit 1
-            }
+          docker compose -f docker-compose.prod.yml ps
+          sed -i.bak "s|\"value\":\"http://localhost:[0-9]*\"|\"value\":\"http://localhost:$GATEWAY_PORT\"|" v1/postman/environment.json
+          echo "Running tests via scripts/test-script.sh (success + failover steps 1–4)..."
+          ./scripts/test-script.sh v1 bonus 8050
           
       - name: Upload Postman report
         if: always()
@@ -321,9 +273,7 @@ jobs:
 
       - name: Stop services
         if: always()
-        run: |
-          cd v1
-          docker compose -f docker-compose.prod.yml down -v
+        run: docker compose -f docker-compose.prod.yml down -v
 
   deploy:
     name: Deploy to Yandex Cloud
@@ -368,17 +318,14 @@ jobs:
             # Логинимся в GitHub Container Registry
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
             
-            # Скачиваем docker-compose файл
-            curl -f -o docker-compose.prod.yml https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/v1/docker-compose.prod.yml || {
+            curl -f -o docker-compose.prod.yml https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/docker-compose.prod.yml || {
               echo "Ошибка: не удалось скачать docker-compose.prod.yml"
               exit 1
             }
             
-            # Создаем директорию для SQL скриптов
             mkdir -p postgres
             
-            # Скачиваем SQL скрипт для инициализации
-            curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/v1/postgres/10-create-user-and-db.sql || {
+            curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/10-create-user-and-db.sql || curl -f -o postgres/10-create-user-and-db.sql https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/10-create-user.sql || {
               echo "Предупреждение: не удалось скачать SQL скрипт, создаем базовый скрипт"
               echo "-- Создание пользователя" > postgres/10-create-user-and-db.sql
               echo "CREATE ROLE program WITH PASSWORD 'test';" >> postgres/10-create-user-and-db.sql
@@ -395,8 +342,7 @@ jobs:
               echo "GRANT ALL PRIVILEGES ON DATABASE privileges TO program;" >> postgres/10-create-user-and-db.sql
             }
             
-            # Скачиваем скрипт для создания баз данных (для init-контейнера)
-            curl -f -o postgres/20-create-databases.sh https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/v1/postgres/20-create-databases.sh || {
+            curl -f -o postgres/20-create-databases.sh https://raw.githubusercontent.com/$GITHUB_REPOSITORY/master/postgres/20-create-databases.sh || {
               echo "Предупреждение: не удалось скачать скрипт создания БД, создаем базовый скрипт"
               echo '#!/bin/bash' > postgres/20-create-databases.sh
               echo 'set -e' >> postgres/20-create-databases.sh

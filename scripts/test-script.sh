@@ -6,6 +6,10 @@ variant=${1:-${VARIANT:-v1}}
 service=${2:-${SERVICE_NAME:-bonus}}
 port=${3:-${PORT_NUMBER:-8050}}
 
+# В CI задают COMPOSE_CMD="docker compose" и COMPOSE_FILE="docker-compose.prod.yml"
+COMPOSE_CMD=${COMPOSE_CMD:-podman compose}
+COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
+
 path=$(dirname "$0")
 
 timed() {
@@ -28,6 +32,7 @@ success() {
     --folder=success \
     --export-environment "$variant"/postman/environment.json \
     --environment "$variant"/postman/environment.json \
+    $NEWMAN_EXTRA_ARGS \
     "$variant"/postman/collection.json
 }
 
@@ -37,7 +42,7 @@ step() {
 
   printf "=== Step %d: %s %s ===\n" "$step" "$operation" "$service"
 
-  podman compose "$operation" "$service"
+  $COMPOSE_CMD -f "$COMPOSE_FILE" "$operation" "$service"
   if [[ "$operation" == "start" ]]; then
     "$path"/wait-for.sh -t 120 "http://localhost:$port/manage/health" -- echo "Host localhost:$port is active"
   fi
@@ -47,6 +52,7 @@ step() {
     --folder=step"$step" \
     --export-environment "$variant"/postman/environment.json \
     --environment "$variant"/postman/environment.json \
+    $NEWMAN_EXTRA_ARGS \
     "$variant"/postman/collection.json
 
   printf "=== Step %d completed ===\n" "$step"
