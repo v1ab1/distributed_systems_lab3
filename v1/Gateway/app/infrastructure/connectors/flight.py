@@ -8,6 +8,7 @@ import httpx
 from dotenv import load_dotenv
 
 from app.presentation.api.schemas import FlightResponse, AirportResponse, AllFlightsResponse
+from app.infrastructure.circuit_breaker import CircuitBreaker
 
 load_dotenv(override=True)
 flight_service_url = os.getenv("FLIGHT_SERVICE_URL", "")
@@ -25,6 +26,10 @@ class FlightConnector:
         return f"{airport.city} {airport.name}"
 
     def get_flights(self, page: int, size: int) -> AllFlightsResponse:
+        breaker = CircuitBreaker.get("flight")
+        return breaker.call(lambda: self._get_flights_impl(page, size))
+
+    def _get_flights_impl(self, page: int, size: int) -> AllFlightsResponse:
         with httpx.Client(verify=False) as client:
             response = client.get(
                 urljoin(flight_service_url, "/v1/flights"),

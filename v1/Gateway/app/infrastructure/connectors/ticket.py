@@ -14,6 +14,7 @@ from app.presentation.api.schemas import (
     TicketCreateRequest,
     TicketPurchaseResponse,
 )
+from app.infrastructure.circuit_breaker import CircuitBreaker
 from app.infrastructure.connectors.bonus import BonusConnector
 
 load_dotenv(override=True)
@@ -92,6 +93,10 @@ class TicketConnector:
             )
 
     def get_user_tickets(self, username: str) -> list[TicketResponse]:
+        breaker = CircuitBreaker.get("ticket")
+        return breaker.call(lambda: self._get_user_tickets_impl(username))
+
+    def _get_user_tickets_impl(self, username: str) -> list[TicketResponse]:
         with httpx.Client(verify=False, timeout=10.0) as client:
             response = client.get(
                 urljoin(ticket_service_url, f"/api/v1/tickets/user/{username}"),
@@ -118,6 +123,10 @@ class TicketConnector:
             return tickets
 
     def get_ticket_by_uid(self, ticket_uid: str) -> TicketResponse:
+        breaker = CircuitBreaker.get("ticket")
+        return breaker.call(lambda: self._get_ticket_by_uid_impl(ticket_uid))
+
+    def _get_ticket_by_uid_impl(self, ticket_uid: str) -> TicketResponse:
         with httpx.Client(verify=False, timeout=10.0) as client:
             response = client.get(
                 urljoin(ticket_service_url, f"/api/v1/tickets/{ticket_uid}"),

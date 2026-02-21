@@ -32,4 +32,7 @@ class TicketService:
         return UserInfoResponse(
             tickets=tickets,
             privilege=PrivilegeShortInfo(balance=me_response.balance, status=me_response.status),
+            history=me_response.history,
+            balance=me_response.balance,
+            status=me_response.status,
         )

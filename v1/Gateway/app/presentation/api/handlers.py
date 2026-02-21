@@ -1,8 +1,11 @@
+import httpx
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from app.services.exceptions import FlightNotFoundError, AirportNotFoundError
+from app.infrastructure.circuit_breaker import CircuitOpenError
 
 
 async def airport_not_found_error_handler(_: Request, exc: AirportNotFoundError) -> JSONResponse:
@@ -35,8 +38,21 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     )
 
 
+async def service_unavailable_handler(
+    _: Request,
+    exc: CircuitOpenError | httpx.HTTPError | httpx.RequestError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"message": "Service unavailable"},
+    )
+
+
 def add_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AirportNotFoundError, airport_not_found_error_handler)  # type: ignore
     app.add_exception_handler(FlightNotFoundError, flight_not_found_error_handler)  # type: ignore
     app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore
     app.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore
+    app.add_exception_handler(CircuitOpenError, service_unavailable_handler)  # type: ignore
+    app.add_exception_handler(httpx.HTTPError, service_unavailable_handler)  # type: ignore
+    app.add_exception_handler(httpx.RequestError, service_unavailable_handler)  # type: ignore

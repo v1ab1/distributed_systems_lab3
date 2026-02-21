@@ -21,3 +21,11 @@ class InsufficientBalanceError(Exception):
         self.balance = balance
         self.required = required
         self.message = message
+
+
+class BonusUnavailableError(Exception):
+    """Bonus недоступен или вернул пустую историю; отмену выполнить нельзя."""
+
+    def __init__(self) -> None:
+        super().__init__("Bonus service unavailable")
+        self.message = "Bonus service unavailable"

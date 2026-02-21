@@ -1,8 +1,11 @@
+import threading
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.presentation.api import routers, handlers
+from app.infrastructure.refund_queue import run_worker
 
 load_dotenv(override=True)
 
@@ -17,6 +20,13 @@ app = FastAPI(
 
 routers.add_routers(app)
 handlers.add_exception_handlers(app)
+
+
+@app.on_event("startup")
+def start_refund_queue_worker() -> None:
+    thread = threading.Thread(target=run_worker, daemon=True)
+    thread.start()
+
 
 app.add_middleware(
     CORSMiddleware,

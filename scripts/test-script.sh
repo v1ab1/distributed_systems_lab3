@@ -2,21 +2,22 @@
 
 set -e
 
-variant=${1:-${VARIANT}}
-service=${2:-${SERVICE_NAME}}
-port=${3:-${PORT_NUMBER}}
+variant=${1:-${VARIANT:-v1}}
+service=${2:-${SERVICE_NAME:-bonus}}
+port=${3:-${PORT_NUMBER:-8050}}
 
 path=$(dirname "$0")
 
 timed() {
+  local start_ts=$1
   end=$(date +%s)
-  dt=$(("$end" - $1))
-  dd=$(("$dt" / 86400))
-  dt2=$(("$dt" - 86400 * "$dd"))
-  dh=$(("$dt2" / 3600))
-  dt3=$(("$dt2" - 3600 * "$dh"))
-  dm=$(("$dt3" / 60))
-  ds=$(("$dt3" - 60 * "$dm"))
+  dt=$((end - start_ts))
+  dd=$((dt / 86400))
+  dt2=$((dt - 86400 * dd))
+  dh=$((dt2 / 3600))
+  dt3=$((dt2 - 3600 * dh))
+  dm=$((dt3 / 60))
+  ds=$((dt3 - 60 * dm))
 
   LC_NUMERIC=C printf "\nTotal runtime: %02d min %02d seconds\n" "$dm" "$ds"
 }
@@ -36,7 +37,7 @@ step() {
 
   printf "=== Step %d: %s %s ===\n" "$step" "$operation" "$service"
 
-  docker compose "$operation" "$service"
+  podman compose "$operation" "$service"
   if [[ "$operation" == "start" ]]; then
     "$path"/wait-for.sh -t 120 "http://localhost:$port/manage/health" -- echo "Host localhost:$port is active"
   fi

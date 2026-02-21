@@ -63,7 +63,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     sessionmaker = get_sessionmaker(engine)
     async with sessionmaker() as session:
         yield session
-        await session.close()
 
 
 @asynccontextmanager
@@ -72,7 +71,6 @@ async def lazy_db_session() -> AsyncGenerator[AsyncSession, None]:
     sessionmaker = get_sessionmaker(engine)
     async with sessionmaker() as session:
         yield session
-        await session.close()
 
 
 async def init_db() -> None:

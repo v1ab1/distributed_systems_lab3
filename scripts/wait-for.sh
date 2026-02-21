@@ -56,8 +56,12 @@ wait_for() {
       fi
       ;;
     http)
-      if ! command -v wget >/dev/null; then
-        echoerr 'wget command is missing!'
+      if command -v wget >/dev/null; then
+        : # wget available
+      elif command -v curl >/dev/null; then
+        : # curl available as fallback
+      else
+        echoerr 'wget or curl command is missing!'
         exit 1
       fi
       ;;
@@ -71,7 +75,11 @@ wait_for() {
         nc -w 1 -z "$HOST" "$PORT" > /dev/null 2>&1
         ;;
       http)
-        wget --timeout=1 -q "$HOST" -O /dev/null > /dev/null 2>&1
+        if command -v wget >/dev/null; then
+          wget --timeout=1 -q "$HOST" -O /dev/null > /dev/null 2>&1
+        else
+          curl -sSf --connect-timeout 1 --max-time 2 "$HOST" -o /dev/null > /dev/null 2>&1
+        fi
         ;;
       *)
         echoerr "Unknown protocol '$PROTOCOL'"

@@ -7,6 +7,7 @@ import httpx
 from dotenv import load_dotenv
 
 from app.presentation.api.schemas import MeResponse
+from app.infrastructure.circuit_breaker import CircuitBreaker
 
 load_dotenv(override=True)
 bonus_service_url = os.getenv("BONUS_SERVICE_URL", "")
@@ -14,6 +15,10 @@ bonus_service_url = os.getenv("BONUS_SERVICE_URL", "")
 
 class BonusConnector:
     def get_me(self, username: str) -> MeResponse:
+        breaker = CircuitBreaker.get("bonus")
+        return breaker.call(lambda: self._get_me_impl(username))
+
+    def _get_me_impl(self, username: str) -> MeResponse:
         with httpx.Client(verify=False, timeout=10.0) as client:
             response = client.get(
                 urljoin(bonus_service_url, "/api/v1/me"),

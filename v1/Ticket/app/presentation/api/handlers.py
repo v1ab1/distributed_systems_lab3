@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from app.services.exceptions import (
     FlightNotFoundError,
     TicketNotFoundError,
+    BonusUnavailableError,
     InsufficientBalanceError,
 )
 
@@ -19,6 +20,10 @@ async def flight_not_found_error_handler(_: Request, exc: FlightNotFoundError) -
 
 async def insufficient_balance_error_handler(_: Request, exc: InsufficientBalanceError) -> JSONResponse:
     return JSONResponse(status_code=402, content={"message": exc.message})
+
+
+async def bonus_unavailable_error_handler(_: Request, exc: BonusUnavailableError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"message": exc.message})
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -40,4 +45,5 @@ def add_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(TicketNotFoundError, ticket_not_found_error_handler)  # type: ignore
     app.add_exception_handler(FlightNotFoundError, flight_not_found_error_handler)  # type: ignore
     app.add_exception_handler(InsufficientBalanceError, insufficient_balance_error_handler)  # type: ignore
+    app.add_exception_handler(BonusUnavailableError, bonus_unavailable_error_handler)  # type: ignore
     app.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore

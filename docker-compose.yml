@@ -1,20 +1,208 @@
-version: "3"
 services:
   postgres:
-    image: library/postgres:13
-    container_name: postgres
-    restart: on-failure
+    image: postgres:13
+    container_name: v1_postgres
+    restart: always
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_USER: ${POSTGRES_USER:-program}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-test}
       POSTGRES_DB: postgres
     volumes:
-      - db-data:/var/lib/postgresql/data
-      - ./postgres/:/docker-entrypoint-initdb.d/
-    ports:
-      - "5432:5432"
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/10-create-user-and-db.sql:/docker-entrypoint-initdb.d/10-create-user-and-db.sql
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-program} -d template1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
-# TODO добавить сервисы
+  postgres-init:
+    image: postgres:13
+    container_name: v1_postgres_init
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-program}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-test}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-test}
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-program}
+      VARIANT: v1
+    volumes:
+      - ./postgres/20-create-databases.sh:/init.sh
+      - ./postgres/scripts:/scripts:ro
+    command:
+      - sh
+      - -c
+      - |
+        chmod +x /init.sh
+        echo 'Waiting for postgres to be ready...'
+        # Используем template1, так как он всегда существует
+        until pg_isready -h postgres -U "${POSTGRES_USER:-program}" -d template1; do
+          echo 'Waiting for postgres...'
+          sleep 1
+        done
+        echo 'Postgres is ready, waiting a bit more...'
+        sleep 3
+        echo 'Creating databases...'
+        /init.sh
+        echo 'Databases created successfully'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_network
+    restart: "no"
+
+  flight:
+    build:
+      context: ./v1/Flight
+      dockerfile: Dockerfile
+    image: ${FLIGHT_DOCKER_IMAGE:-flight-app:latest}
+    container_name: v1_flight
+    restart: always
+    ports:
+      - "${FLIGHT_PORT:-8060}:8060"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-program}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-test}
+      DB_NAME: flights
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        echo 'Waiting for flights database...'
+        export PGPASSWORD="$$DB_PASSWORD"
+        until psql -h postgres -U "$$DB_USER" -d flights -c 'SELECT 1' > /dev/null 2>&1; do
+          echo 'Database not ready, waiting...'
+          sleep 2
+        done
+        echo 'Database ready, starting application...'
+        uvicorn app.presentation.api.main:app --host 0.0.0.0 --port 8060
+    networks:
+      - app_network
+
+  bonus:
+    build:
+      context: ./v1/Bonus
+      dockerfile: Dockerfile
+    image: ${BONUS_DOCKER_IMAGE:-bonus-app:latest}
+    container_name: v1_bonus
+    restart: always
+    ports:
+      - "${BONUS_PORT:-8050}:8050"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-program}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-test}
+      DB_NAME: privileges
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        echo 'Waiting for privileges database...'
+        export PGPASSWORD="$$DB_PASSWORD"
+        until psql -h postgres -U "$$DB_USER" -d privileges -c 'SELECT 1' > /dev/null 2>&1; do
+          echo 'Database not ready, waiting...'
+          sleep 2
+        done
+        echo 'Database ready, starting application...'
+        uvicorn app.presentation.api.main:app --host 0.0.0.0 --port 8050
+    networks:
+      - app_network
+
+  ticket:
+    build:
+      context: ./v1/Ticket
+      dockerfile: Dockerfile
+    image: ${TICKET_DOCKER_IMAGE:-ticket-app:latest}
+    container_name: v1_ticket
+    restart: always
+    ports:
+      - "${TICKET_PORT:-8070}:8070"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-program}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-test}
+      DB_NAME: tickets
+      GATEWAY_SERVICE_URL: http://gateway:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        echo 'Waiting for tickets database...'
+        export PGPASSWORD="$$DB_PASSWORD"
+        until psql -h postgres -U "$$DB_USER" -d tickets -c 'SELECT 1' > /dev/null 2>&1; do
+          echo 'Database not ready, waiting...'
+          sleep 2
+        done
+        echo 'Database ready, starting application...'
+        uvicorn app.presentation.api.main:app --host 0.0.0.0 --port 8070
+    networks:
+      - app_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: v1_redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - app_network
+
+  gateway:
+    build:
+      context: ./v1/Gateway
+      dockerfile: Dockerfile
+    image: ${GATEWAY_DOCKER_IMAGE:-gateway-app:latest}
+    container_name: v1_gateway
+    restart: always
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      FLIGHT_SERVICE_URL: http://flight:8060
+      TICKET_SERVICE_URL: http://ticket:8070
+      BONUS_SERVICE_URL: http://bonus:8050
+      REDIS_URL: redis://redis:6379/0
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-3}
+      CIRCUIT_BREAKER_RECOVERY_TIMEOUT: ${CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-5}
+    depends_on:
+      flight:
+        condition: service_started
+      ticket:
+        condition: service_started
+      bonus:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - app_network
 
 volumes:
-  db-data:
+  postgres_data:
+
+networks:
+  app_network:
+    driver: bridge

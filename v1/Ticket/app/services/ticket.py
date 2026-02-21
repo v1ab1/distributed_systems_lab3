@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from app.services.enums import TicketStatus
 from app.db.models.ticket import TicketDB
-from app.services.exceptions import TicketNotFoundError, InsufficientBalanceError
+from app.services.exceptions import TicketNotFoundError, BonusUnavailableError, InsufficientBalanceError
 from app.presentation.api.schemas import (
     TicketResponse,
     TicketCreateRequest,
@@ -107,6 +107,9 @@ class TicketService:
             return
 
         history = await self._bonus_connector.get_user_history(username)
+
+        if not history:
+            raise BonusUnavailableError()
 
         ticket_uuid = uuid.UUID(ticket_uid)
         ticket_history = None

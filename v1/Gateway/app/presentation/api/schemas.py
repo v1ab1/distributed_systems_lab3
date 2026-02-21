@@ -116,6 +116,10 @@ class TicketPurchaseResponse(BaseModel):
 class UserInfoResponse(BaseModel):
     tickets: list[TicketResponse]
     privilege: PrivilegeShortInfo
+    history: list[HistoryItem] = []
+    # Топ-уровень для совместимости с Ticket service: get_user_balance() берёт response_json.get("balance", 0)
+    balance: int = 0
+    status: str = ""
 
 
 class PrivilegeInfoResponse(BaseModel):

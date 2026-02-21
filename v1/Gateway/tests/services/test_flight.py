@@ -1,11 +1,11 @@
-from app.presentation.api.schemas import AllFlightsResponse, FlightResponse
+from app.presentation.api.schemas import FlightResponse, AllFlightsResponse
 
 
 class TestFlightService:
     def test_get_all_success(self, flight_service, mock_flight_connector):
         page = 1
         size = 10
-        
+
         expected_response = AllFlightsResponse(
             page=1,
             pageSize=10,
@@ -20,11 +20,11 @@ class TestFlightService:
                 )
             ],
         )
-        
+
         mock_flight_connector.get_flights.return_value = expected_response
-        
+
         result = flight_service.get_all(page, size)
-        
+
         mock_flight_connector.get_flights.assert_called_once_with(page, size)
         assert isinstance(result, AllFlightsResponse)
         assert result.page == expected_response.page
@@ -36,18 +36,18 @@ class TestFlightService:
     def test_get_all_empty(self, flight_service, mock_flight_connector):
         page = 1
         size = 10
-        
+
         expected_response = AllFlightsResponse(
             page=1,
             pageSize=10,
             totalElements=0,
             items=[],
         )
-        
+
         mock_flight_connector.get_flights.return_value = expected_response
-        
+
         result = flight_service.get_all(page, size)
-        
+
         mock_flight_connector.get_flights.assert_called_once_with(page, size)
         assert isinstance(result, AllFlightsResponse)
         assert result.totalElements == 0

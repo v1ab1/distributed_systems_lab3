@@ -7,6 +7,7 @@ from app.services.enums import TicketStatus
 from app.services.exceptions import (
     FlightNotFoundError,
     TicketNotFoundError,
+    BonusUnavailableError,
     InsufficientBalanceError,
 )
 from app.presentation.api.schemas import (
@@ -162,12 +163,32 @@ class TestTicketService:
         ticket_uid = str(sample_ticket.ticket_uid)
         username = "testuser"
         mock_ticket_repository.get_by_ticket_uid.return_value = sample_ticket
-        mock_bonus_connector.get_user_history.return_value = []
+        # Непустая история, но без записи по этому билету — отмена без списания бонусов
+        mock_bonus_connector.get_user_history.return_value = [
+            {"ticketUid": str(uuid.uuid4()), "balanceDiff": 100, "operationType": "FILL_IN_BALANCE"}
+        ]
 
         asyncio.run(ticket_service.cancel_ticket(ticket_uid, username))
 
         mock_ticket_repository.get_by_ticket_uid.assert_awaited_once_with(ticket_uid)
         mock_ticket_repository.cancel_ticket.assert_awaited_once_with(ticket_uid)
+
+    def test_cancel_ticket_empty_history_raises_bonus_unavailable(
+        self,
+        ticket_service,
+        mock_ticket_repository,
+        mock_bonus_connector,
+        sample_ticket,
+    ):
+        ticket_uid = str(sample_ticket.ticket_uid)
+        username = "testuser"
+        mock_ticket_repository.get_by_ticket_uid.return_value = sample_ticket
+        mock_bonus_connector.get_user_history.return_value = []
+
+        with pytest.raises(BonusUnavailableError):
+            asyncio.run(ticket_service.cancel_ticket(ticket_uid, username))
+
+        mock_ticket_repository.cancel_ticket.assert_not_awaited()
 
     def test_cancel_ticket_not_found(self, ticket_service, mock_ticket_repository, mock_bonus_connector):
         ticket_uid = str(uuid.uuid4())

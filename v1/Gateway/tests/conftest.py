@@ -2,12 +2,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.infrastructure.connectors.bonus import BonusConnector
-from app.infrastructure.connectors.flight import FlightConnector
-from app.infrastructure.connectors.ticket import TicketConnector
 from app.services.bonus import BonusService
 from app.services.flight import FlightService
 from app.services.ticket import TicketService
+from app.infrastructure.connectors.bonus import BonusConnector
+from app.infrastructure.connectors.flight import FlightConnector
+from app.infrastructure.connectors.ticket import TicketConnector
 
 
 @pytest.fixture

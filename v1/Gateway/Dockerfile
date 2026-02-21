@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir \
     fastapi-cli==0.0.5 \
     asyncpg==0.29.0 \
     httpx>=0.27.0 \
+    redis>=5.0.0 \
     uvicorn[standard]
 
 COPY ./app ./app
